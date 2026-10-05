@@ -1,0 +1,17 @@
+# 依赖与本地安装产物
+node_modules/
+
+# 本地安装脚本留下的备份 / 日志（profile 目录里的那些，正常不会出现在仓库里）
+cordis.patch.yml.dsh-archived-sessions.bak
+.plugin-manager/
+*.log
+
+# 删除会话时的回收站（只在本机 DSH_HOME 里，防手滑）
+sessions-trash/
+
+# 编辑器 / 操作系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store

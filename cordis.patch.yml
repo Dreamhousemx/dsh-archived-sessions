@@ -1,0 +1,7 @@
+# Bundle patch for the installed-package route: when this package is listed in
+# the profile's `dsh.profile.bundles`, this entry mounts it by package name.
+# The no-pnpm route (plugins/ junction) instead writes an equivalent `insert`
+# row pointing at ./plugins/archived-sessions/lib/index.js in the profile patch.
+- insert:
+    - id: archived-sessions
+      name: dsh-archived-sessions

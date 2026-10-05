@@ -1,0 +1,13 @@
+# 默认按内容自动识别文本文件
+* text=auto
+
+# Windows 批处理必须是 CRLF，否则 for/f 之类的块会出问题
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
