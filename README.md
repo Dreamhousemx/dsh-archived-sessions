@@ -160,6 +160,7 @@ bundle-install.cmd bundle-remove.cmd       官方包路线（调用 dsh plugin �
 tools/test-host.cjs   宿主半边隔离单测
 tools/test-client.cjs 浏览器半边离线单测（最小 React 桩）
 tools/verify-live.cjs 对运行中的实例做只读验证
+CHANGELOG.md          版本变更记录（每个版本对应一个 git tag）
 ```
 
 宿主半边只依赖两个服务：`webServer`（注册 `kind: 'prefix'` 路由）与 `workspaceRegistry`（归档状态、工作区归属、`unarchiveSession`、`detachSession`）；`sessions` 用 `ctx.get('sessions')` 机会式读取，用来判断会话是否仍被宿主持有（即“运行中”）。路由自带信任围栏：只接受回环或 `webRuntime.trustedHosts` 里的 Host、`sec-fetch-site` 非 cross-site、并且 `Origin` 与 Host 同名。
@@ -191,6 +192,10 @@ tools/verify-live.cjs 对运行中的实例做只读验证
 - 标题来自 `storages/session_projcache`；缓存缺失时回退到会话 ID。
 - 修改 `lib/index.js` 后需重启 DSH 才会加载新宿主代码（客户端半边只需刷新）。
 - 本地 patch 路线与官方包路线互斥（同一个 entry id 会被挂载两次）；`status.cmd` 的 `channel` 一行会指出当前生效的是哪条。
+
+## 更新日志
+
+见 [CHANGELOG.md](CHANGELOG.md)；当前版本 `1.0.0`（tag `v1.0.0`）。
 
 ## 许可证
 
