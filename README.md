@@ -23,6 +23,16 @@
   - **恢复**：把会话从归档状态取出，回到它原来的工作区位置（调用 DSH 自己的 `unarchiveSession`）。
   - **删除**：内联二次确认后删除（见下方「删除策略」）。
   - 正在运行的会话：**只能恢复，不能删除**（按钮置灰，页面顶部有提示条）；重启 DSH 后即可删除。
+  - 删除过的会话会从本页与侧边栏一起消失（它保留归档标记，页面按「日志已不在」识别并跳过这种行，删除后还会主动拉一次宿主会话目录，让侧边栏里那一行立刻消失——包括「未分组」里那种）。
+- 侧边栏的会话行菜单（`...` 与右键）里增加两项：
+  - **打开文件夹**：在系统文件管理器里定位该会话的工作目录（与 DSH 其他「打开文件夹」动作同一实现）。
+  - **删除任务**：与设置页同一套删除流程；第一次点击只是把该行变成 **确认删除**，再点一次才真正执行，删完同样会拉一次会话目录让侧边栏那一行当场消失。
+  - 行不可用时两项分别置灰：没有 `cwd`（或平台不支持打开目录）时「打开文件夹」置灰；会话正在运行时「删除任务」置灰（与设置页同一条规则）。
+  - 宿主半边尚未重新加载（刚升级、还没重启 DSH，`/describe` 返回 404）时不会整行变灰：`cwd` 回退到 shell 自己的会话目录，而「问不到是否运行中」不会被当成运行中。
+- 侧边栏新增「批量操作」面板（轨道上的一个按钮）：列出 shell 当前全部会话，逐行勾选后一次性 **归档 / 恢复 / 删除** 所选。
+  - 删除与行菜单同一条红线：**两步确认**（首点把按钮改名为「确认删除 N 个会话」），逐个串行执行，结束后报告成功/失败数量与首个失败原因。
+  - 串行而非并发，是因为每次调用都在改同一份工作区记账，并发写会和持久化快照抢锁。
+  - 「归档所选」没有插件宿主路由，调用的是 shell 自带的 `workspaces.archiveSession`（DSH 本体把归档视为工作区变更，不对外暴露删除式接口）。
 - 排版对齐 DSH 原生设置页：`max-width:760px` 栏目、18px 标题 / 13px 说明 / 14px 行标题 / 12px 次要信息的字号阶梯、只使用 `--dsw-*` 设计 token；容器与滚动条交给设置面板本身，页面不自建高度或内层滚动区。按钮与搜索框优先复用平台内置控件（`@deepseek-ai/dsh-client-ui-primitives`），取不到时降级为同款式的原生元素。
 
 ## 安装
@@ -99,15 +109,19 @@ DSH 会自动重载 profile patch，**宿主半边立即生效、无需重启**�
 ```
 status.cmd                       :: 安装渠道、联接/依赖、loader 记录、宿主路由、客户端 bundle 注册情况
 node tools\verify-live.cjs       :: 只读探活：ping / list / 客户端 bundle 是否真的能取到
-node tools\test-host.cjs         :: 宿主半边隔离单测：20 项，临时 DSH_HOME，不碰真实数据
-node tools\test-client.cjs       :: 浏览器半边离线单测：45 项，自带最小 React，真实调用组件并检查元素树
+node tools\test-host.cjs         :: 宿主半边隔离单测：27 项，临时 DSH_HOME，不碰真实数据
+node tools\test-client.cjs       :: 浏览器半边离线单测：95 项，自带最小 React，真实调用组件并检查元素树
 ```
 
-`test-host.cjs` 覆盖：ping（含客户端 bundle 上报的三种状态）、list 的字段合并、信任围栏（跨站 / 陌生 Host / trustedHosts / `Origin: null` / Origin 不匹配 / 匹配）、非法会话 ID 400、未知路径 404、错误方法 405、恢复、运行中删除 409、删除（分离工作区记账 + 日志与投影缓存移入回收站）、未归档会话删除、日志目录缺失时的删除。
+`test-host.cjs` 覆盖：ping（含客户端 bundle 上报的三种状态）、list 的字段合并、信任围栏（跨站 / 陌生 Host / trustedHosts / `Origin: null` / Origin 不匹配 / 匹配）、非法会话 ID 400、未知路径 404、错误方法 405、恢复、运行中删除 409、删除（分离工作区记账 + 日志与投影缓存移入回收站）、**删除绝不取消归档（否则会话会被"恢复"回工作区）**、**被删除的会话在 list 里仍带 `logsMissing: true`**、未归档会话删除、日志目录缺失时的删除、**`describe` 返回单个会话的 `cwd` / 归档 / 运行中 / 日志缺失事实（行菜单据此决定按钮是否置灰）**。
 
 `test-host.cjs` 与 `test-client.cjs` 完全离线自包含（不依赖 DSH 在运行，`test-client.cjs` 自带最小 React 桩）；`verify-live.cjs` 需要一个正在运行的实例。
 
-`test-client.cjs` 覆盖：bundle 的导出契约（`apply` / `inject`）、`settings.section` 注册（id / order / label / props 工厂 / 样式只注入一次）、**排版契约**（根节点不自建滚动容器、不写死高度、采用原生 `max-width:760px` 与 13/14/12px 字号阶梯、复用 `--dsw-radius-*` / `--dsw-alias-border-l4` 等 token、所有规则都限定在本页根节点下）、以及真实渲染结果——标题与计数、按工作区的分组与路径、`运行中` 提示条、删除按钮在运行中置灰且带原因、空闲会话可删除、无数据时的空态、注入 hook 缺失时不崩页、**平台原子库缺失时降级为原生 `<button>` / `<input>` 仍可用**。
+`test-client.cjs` 覆盖：bundle 的导出契约（`apply` / `inject`）、`settings.section` 注册（id / order / label / props 工厂 / 样式只注入一次）、**排版契约**（根节点不自建滚动容器、不写死高度、采用原生 `max-width:760px` 与 13/14/12px 字号阶梯、复用 `--dsw-radius-*` / `--dsw-alias-border-l4` 等 token、所有规则都限定在本页根节点下）、以及真实渲染结果——标题与计数、按工作区的分组与路径、`运行中` 提示条、删除按钮在运行中置灰且带原因、空闲会话可删除、**点击删除后确实走二次确认、并且在删除成功后调用 `sessions.refresh()` 拉一次会话目录**（`refreshSessionCatalog` 不可用时安静跳过）、**宿主报 `logsMissing` 的已删除行不渲染**、无数据时的空态、注入 hook 缺失时不崩页、**平台原子库缺失时降级为原生 `<button>` / `<input>` 仍可用**。
+
+侧边栏行菜单部分另有覆盖：`sidebar.workspaces.session.menu.item` 注册（id / order / 与设置页互不串用的 props 工厂）、**菜单打开时才向宿主 `describe`（关着不花宿主调用）**、只提供「打开文件夹 / 删除任务」两项、**删除是两步（首点只改文案为「确认删除」，再点才调用宿主删除并拉一次会话目录）**、**宿主半边尚未重新加载（`/describe` 返回 404）时仍按客户端自己的 `cwd` 提供「打开文件夹」，且不会把「问不到是否运行中」当成运行中而误置灰**、以及右键：在 `document` 上装一个委托监听、只接管 `data-row-key="session:<id>"` 的行，其他行、左键、已被别人 `preventDefault` 的右键都不碰。
+
+批量操作面板部分：`sidebar.panellist` 轨道按钮与 `main` 面板体**用同一个 id 配对注册**、轨道按钮只画图标不写字、面板列出的是 shell 自己的会话目录、初始「已选择 0 个会话」、每个会话一个复选框、全选后计数跟随、**批量删除同样是两步（首点只把动作改名为「确认删除 N 个会话」）**、确认后**逐个串行执行一次宿主调用并拉一次目录**、结束后报告「已完成 N 个会话」；**改选会解除待确认、重复点击也不会把同一批跑两遍**（重入守卫用 ref 而不是 `busy` 状态，因为第二次点击赶在 React 重渲染出禁用按钮之前到达）；「归档所选」没有插件宿主路由，走的是 shell 自带的 `workspaces.archiveSession`。
 
 ## 卸载 / 回滚
 
@@ -138,12 +152,16 @@ revert.cmd
 
 删除**不是**从任何注册表里抹掉记录——DSH 没有这个能力。本插件的删除是一次「安全下架 + 移入回收站」：
 
-1. 若会话仍在归档集合里，先取消归档（保持状态一致）。
-2. 从工作区记录里分离会话（`WorkspaceRecord.detachSession`），这样侧边栏不再出现它。
-3. 把日志目录 `<DSH_HOME>\sessions\<project key>\<session id>\` 与投影缓存 `<DSH_HOME>\storages\session_projcache\sessions\<id>.json` 一起移动到
+1. 从工作区记录里分离会话（`WorkspaceRecord.detachSession`），这样它不再挂在任何工作区分组下。
+2. 把日志目录 `<DSH_HOME>\sessions\<project key>\<session id>\` 与投影缓存 `<DSH_HOME>\storages\session_projcache\sessions\<id>.json` 一起移动到
    `<DSH_HOME>\sessions-trash\<ISO 时间戳>__<session id>\`。
+3. **归档标记保留**（不调用 `unarchiveSession`）。这正是 v1.0.1 修掉的那个 bug：`unarchiveSession` 的语义是「把会话放回它记录的工作区位置」，而侧边栏只按 `archivedSessionIds` 决定隐藏与否——所以删除时取消归档，等于删一次就恢复一次。归档标记留着，会话才不会回到工作区。
+4. 页面（与侧边栏）靠「日志已经不在」把这种已删除行藏起来：`GET /list` 对每行给出 `logsMissing`（`directory` 为空且会话未被宿主打开时为 `true`），占位行不渲染；客户端同时把「没有日志目录且未运行」视为同一结论，因此宿主半边还没重新加载（只按了 F5）时也能马上生效。
+5. **删除后主动拉一次会话目录**（`sessions.refresh()`，即 DSH 客户端「重新读取会话列表」的那个调用）。第 2 步只是搬文件，DSH 的会话列表只在显式拉取时才会变，所以侧边栏可能还留着一行它早先学到的记录——而**归档标记只负责「默认视图里不显示」**：如果侧边栏开着「显示已归档会话」，或者行已经从工作区分组里分离出去，它就会以「未分组」的样子露出来。拉一次目录，宿主列表里已经不含它，这一行才会当场消失。
 
-**没有任何数据被真正抹掉**，想彻底清空自己删 `sessions-trash` 即可。响应里的 `trashedTo` 就是落地目录。
+侧边栏行菜单里的「删除任务」走的是同一条路径（同一个宿主 `POST /delete`），区别只在入口：菜单里是一次「先确认再删」的两步点击。两个入口共用同一份 `createRowActions`，所以置灰规则（运行中不可删、无 `cwd` 不可打开文件夹）不会出现两套说法。
+
+代价是宿主状态里会留一个指向已删日志的归档 id（DSH 本体没有「彻底忘掉一个会话」的接口，持久化层只追加）；它在页面与侧边栏都不可见，重启后也不会复活。要真正清空，自己删 `sessions-trash` 即可——响应里的 `trashedTo` 就是落地目录。
 
 **运行中/被保留的会话会被拒绝删除（HTTP 409）**：宿主仍持有它的会话对象，日志句柄可能还开着，直接改目录名在 Windows 上会和写入竞态，可能损坏日志。**恢复**任何时候都允许；要删除这样的会话，重启一次 DeepSeek Harness（重启后没有会话被宿主打开）或先关闭它即可。同理，如果一个被归档的会话正是你此刻正在使用的会话，它的删除按钮会是灰的——设计如此。
 
@@ -152,8 +170,8 @@ revert.cmd
 ```
 package.json          dsh.bundle.patch + dsh.client（platform: web, exports["./client"]）声明；包名被 dsh.profile.bundles 引用即挂载
 cordis.patch.yml      bundle 自带的 loader 记录（官方包路线靠它挂载；本地路线用 profile 的 patch）
-lib/index.js          宿主半边：注册 GET/POST /archived-sessions/api/{ping,list,restore,delete}
-lib/client.js         浏览器半边：导出的 ESM bundle，注册一个 settings.section
+lib/index.js          宿主半边：注册 GET/POST /archived-sessions/api/{ping,list,restore,delete,describe}
+lib/client.js         浏览器半边：导出的 ESM bundle，注册设置页、会话行菜单（`...` 与右键）与「批量操作」侧边栏面板
 lib/setup.cjs         install / revert / bundle-install / bundle-remove / status 的全部逻辑（.cmd 只负责找 node 与 dsh 并调用它）
 install.cmd revert.cmd status.cmd          本地 patch 路线 + 状态报告
 bundle-install.cmd bundle-remove.cmd       官方包路线（调用 dsh plugin … add/remove）
@@ -189,13 +207,14 @@ CHANGELOG.md          版本变更记录（每个版本对应一个 git tag）
 ## 已知边界
 
 - 页面只列**已归档**的会话（这是需求本身）；未归档会话不在此页出现。
+- 删除过的会话会在宿主里留下一个归档标记（DSH 本体没有「彻底忘掉一个会话」的接口），但它在本页与侧边栏都不可见（页面按 `logsMissing` 跳过），重启也不会自己回到工作区。想连标记一起清掉只能改 `<DSH_HOME>\storages\workspace.json` 的 `archivedSessionIds`。
 - 标题来自 `storages/session_projcache`；缓存缺失时回退到会话 ID。
 - 修改 `lib/index.js` 后需重启 DSH 才会加载新宿主代码（客户端半边只需刷新）。
 - 本地 patch 路线与官方包路线互斥（同一个 entry id 会被挂载两次）；`status.cmd` 的 `channel` 一行会指出当前生效的是哪条。
 
 ## 更新日志
 
-见 [CHANGELOG.md](CHANGELOG.md)；当前版本 `1.0.0`（tag `v1.0.0`）。
+见 [CHANGELOG.md](CHANGELOG.md)；当前版本 `1.0.1`（tag `v1.0.1`）。
 
 ## 许可证
 

@@ -80,6 +80,8 @@ function allText(node) {
 
 const byType = (node, type) => collect(node, (item) => item.type === type)
 const buttons = (node) => byType(node, 'button')
+/** The first button whose rendered text contains `text`, or null. */
+const findByText = (node, text) => buttons(node).find((button) => allText(button).includes(text)) || null
 
 // #endregion
 
@@ -144,6 +146,9 @@ function createHarness(Component, initialProps) {
  * shapes the real atoms have: `Button` renders a native `<button type="button">`
  * and forwards `className`/`disabled`/`title`/`onClick`; `Input` puts
  * `className` on a wrapper and spreads the rest onto the inner `<input>`.
+ * `Menu` / `MenuItemButton` mirror the row-menu atoms: `Menu` renders its
+ * children (the harness walks them) and `MenuItemButton` renders a button
+ * carrying `disabled` / `danger` / `separatorBefore` as props.
  */
 const PrimitivesStub = {
 	Button(props) {
@@ -167,6 +172,28 @@ const PrimitivesStub = {
 			},
 		}
 	},
+	Menu(props) {
+		const { anchor, children } = props
+		return { type: 'div', props: { className: 'primitives-menu', 'data-menu': '', children } }
+	},
+	MenuItemButton(props) {
+		const { icon, disabled, danger, separatorBefore, onSelect, title, children } = props
+		return {
+			type: 'button',
+			props: {
+				type: 'button',
+				disabled,
+				title,
+				role: 'menuitem',
+				'data-danger': danger === true ? '' : undefined,
+				'data-separator': separatorBefore === true ? '' : undefined,
+				onClick: onSelect,
+				children,
+			},
+		}
+	},
+	IconFolderOpenOutlineRegular() { return { type: 'svg', props: { 'data-icon': 'folder' } } },
+	IconTrashOutlineRegular() { return { type: 'svg', props: { 'data-icon': 'trash' } } },
 }
 
 /**
@@ -174,18 +201,22 @@ const PrimitivesStub = {
  * `withPrimitives: false` simulates a DSH build whose atom package is missing,
  * which must degrade to plain elements instead of blanking the panel.
  */
-function loadBundle(withPrimitives = true) {
+function loadBundle(withPrimitives = true, withReactDom = true, fetchStub) {
 	const source = fs.readFileSync(CLIENT, 'utf8')
 	const captured = { load: null }
 	const windowStub = { __ModuleLoader__: { load: (mod) => { captured.load = mod } } }
 	const styles = []
 	const documentStub = {
 		getElementById: (id) => styles.find((style) => style.id === id) || null,
-		createElement: (tag) => ({ tag }),
+		createElement: (tag) => ({ tag, setAttribute(k, v) { this[k] = v }, remove() { this.removed = true } }),
 		head: { appendChild: (element) => styles.push(element) },
+		body: { appendChild: () => {} },
+		addEventListener: () => {},
+		removeEventListener: () => {},
 	}
 	const requireStub = (name) => {
 		if (name === 'react') return ReactStub
+		if (name === 'react-dom/client') return withReactDom ? ReactDomStub : undefined
 		if (name === '@deepseek-ai/dsh-client-ui-primitives') {
 			if (withPrimitives) return PrimitivesStub
 			throw new Error('Cannot find module')
@@ -193,12 +224,26 @@ function loadBundle(withPrimitives = true) {
 		throw new Error(`unexpected require("${name}") — declare it in dsh.client.external`)
 	}
 	const run = new Function('window', 'require', 'document', 'fetch', source)
-	run(windowStub, requireStub, documentStub, async () => { throw new Error('unexpected fetch') })
+	run(windowStub, requireStub, documentStub, fetchStub || (async () => { throw new Error('unexpected fetch') }))
 	if (captured.load === null) throw new Error('the bundle never called window.__ModuleLoader__.load')
 	return { id: captured.load.id, exports: captured.load.factory(requireStub), styles }
 }
 
 // #endregion
+
+/**
+ * Stand-in for `react-dom/client`. The plugin only uses it to own the
+ * right-click overlay's mount point; the harness records the rendered element
+ * so tests can call the `onClose` handler a real menu would call.
+ */
+const ReactDomStub = {
+	createRoot(container) {
+		return {
+			render(element) { container.rendered = element },
+			unmount() { container.unmounted = true },
+		}
+	},
+}
 
 function report() {
 	console.log('')
@@ -211,11 +256,15 @@ async function main() {
 
 	check('bundle registers under the package name', loaded.id === 'dsh-archived-sessions', loaded.id)
 	check('bundle exports apply + inject', typeof loaded.exports.apply === 'function' && Array.isArray(loaded.exports.inject))
-	check('inject declares slots and workspaces', JSON.stringify(loaded.exports.inject) === JSON.stringify(['slots', 'workspaces']), JSON.stringify(loaded.exports.inject))
+	check('inject declares slots, workspaces, sessions and remote',
+		JSON.stringify(loaded.exports.inject) === JSON.stringify(['slots', 'workspaces', 'sessions', 'remote']),
+		JSON.stringify(loaded.exports.inject))
 
 	// 2. apply(ctx) ---------------------------------------------------------
 	let registered = null
 	const injections = []
+	const effects = []
+	const mounted = []
 	const slots = {
 		inject: (key, callback) => {
 			injections.push(key)
@@ -223,15 +272,21 @@ async function main() {
 			return () => {}
 		},
 		register: (options, component) => {
-			registered = { options, component }
+			mounted.push({ options, component })
+			if (options.name === 'settings.section') registered = { options, component }
 			return () => {}
 		},
 	}
-	const ctx = { get: () => undefined, slots }
+	const ctx = {
+		get: () => undefined,
+		slots,
+		effect: (callback) => { effects.push(callback()); return () => {} },
+	}
 	loaded.exports.apply(ctx)
 
-	check('apply injects into settings.section', injections.length === 1 && injections[0] === 'settings.section', JSON.stringify(injections))
-	check('apply registers exactly one section', registered !== null)
+	check('apply injects into settings.section', registered !== null && injections[0] === 'settings.section', JSON.stringify(injections))
+	check('apply injects into sidebar.workspaces.session.menu.item', injections[1] === 'sidebar.workspaces.session.menu.item', JSON.stringify(injections))
+	check('apply registers a second slot (session row menu)', mounted.length === 4, String(mounted.length))
 	if (registered === null) return report()
 	check('section id is archived-sessions', registered.options.id === 'archived-sessions', registered.options.id)
 	check('section order is 4200', registered.options.order === 4200, String(registered.options.order))
@@ -313,7 +368,7 @@ async function main() {
 	check('actions use the shipped atom', Boolean(restoreButton) && Boolean(removeButton)
 		&& /primitives-button/.test(String(restoreButton.props.className)) && /primitives-button/.test(String(removeButton.props.className))
 		&& /as-danger/.test(String(removeButton.props.className)), JSON.stringify([restoreButton?.props.className, removeButton?.props.className]))
-	check('hint line is rendered', liveText.includes(props.messages.hint))
+	check('footer hint line is gone (the intro carries the delete contract)', props.messages.hint === undefined && liveText.includes('保留归档标记') === false)
 
 	// idle session: delete becomes available
 	const idle = await renderWith([Object.assign({}, liveRow, { live: false })])
@@ -321,11 +376,54 @@ async function main() {
 	check('idle session can be deleted', Boolean(idleRemove) && idleRemove.props.disabled === false, JSON.stringify(idleRemove?.props))
 	check('idle session shows no warning note', collect(idle, (item) => item.props['data-kind'] === 'warn').length === 0)
 
+	// 3b. deleting also refreshes the shell's session catalog -----------------
+	// The host only moves the log file, so nothing tells the shell its row is
+	// gone: the row would keep drawing inside its workspace group, or under
+	// "未分组/Ungrouped" once the accounting slot is detached. One catalog pull
+	// after a successful delete is what removes it.
+	let catalogRefreshes = 0
+	const deleteApi = Object.assign({}, api, {
+		refreshSessionCatalog: async () => { catalogRefreshes += 1; return true },
+	})
+	hostRows = [Object.assign({}, liveRow, { live: false })]
+	currentSnapshot = archivedSnapshot
+	const deleteHarness = createHarness(registered.component, { messages: props.messages, api: deleteApi, useWorkspaces })
+	let deleteTree = deleteHarness.render()
+	await tick()
+	deleteTree = deleteHarness.render()
+	const askDelete = buttons(deleteTree).find((button) => allText(button) === props.messages.remove)
+	check('idle row offers the delete action', Boolean(askDelete) && askDelete.props.disabled === false, JSON.stringify(askDelete?.props))
+	askDelete.props.onClick()
+	const confirmTree = deleteHarness.render()
+	const confirmButton = buttons(confirmTree).find((button) => allText(button) === props.messages.confirmRemove)
+	check('delete asks for confirmation first', Boolean(confirmButton), allText(confirmTree).slice(0, 120))
+	confirmButton.props.onClick()
+	await tick()
+	const deletedTree = deleteHarness.render()
+	check('delete refreshes the shell session catalog', catalogRefreshes === 1, String(catalogRefreshes))
+	check('deleted row leaves the page', !allText(deletedTree).includes('单元测试会话'), allText(deletedTree).slice(0, 120))
+	check('deleted row announces the trash path', allText(deletedTree).includes('sessions-trash'), allText(deletedTree).slice(0, 160))
+	hostRows = []
+
 	// the workspace snapshot alone still lists a session the host route omits
 	const snapshotOnly = await renderWith([])
 	const titleNode = collect(snapshotOnly, (item) => item.props.className === 'as-title')[0]
 	check('snapshot alone keeps the session listed', allText(snapshotOnly).includes('session-aaa'), allText(snapshotOnly))
 	check('snapshot-only row falls back to the session id as its title', Boolean(titleNode) && allText(titleNode) === 'session-aaa', allText(titleNode))
+
+	// a session the host reports as deleted (its log is gone) must not be listed:
+	// the archive flag keeps it in the client snapshot, the host row is the only
+	// thing that says there is nothing left to restore or delete
+	const deleted = await renderWith([Object.assign({}, liveRow, { live: false, logsMissing: true })])
+	check('deleted session is not listed even though the snapshot still archives it',
+		allText(deleted).includes(props.messages.empty) && !allText(deleted).includes('单元测试会话'), allText(deleted))
+	check('deleted session renders no row', collect(deleted, (item) => item.props['data-session-id'] === 'session-aaa').length === 0)
+
+	// the same verdict for a host that predates the logsMissing flag: no log
+	// directory and not running is a deleted session
+	const legacy = await renderWith([Object.assign({}, liveRow, { live: false, directory: null })])
+	check('deleted session is inferred from a missing log directory too',
+		collect(legacy, (item) => item.props['data-session-id'] === 'session-aaa').length === 0)
 
 	// nothing archived anywhere
 	const empty = await renderWith([], undefined, emptySnapshot)
@@ -334,16 +432,20 @@ async function main() {
 	// missing injected hook must not crash the page
 	const withoutHook = await renderWith([liveRow], { useWorkspaces: undefined })
 	check('missing useWorkspaces hook does not crash', allText(withoutHook).includes(props.messages.heading), allText(withoutHook).slice(0, 80))
-	check('missing hook still renders the page body', allText(withoutHook).includes(props.messages.hint), allText(withoutHook))
+	check('missing hook still renders the page body', allText(withoutHook).includes(props.messages.intro) && allText(withoutHook).includes(liveRow.title), allText(withoutHook))
 
 	// 4. a DSH build without the atom package degrades gracefully ------------
-	const fallback = loadBundle(false)
+	const fallback = loadBundle(false, false)
 	let fallbackRegistered = null
 	fallback.exports.apply({
 		get: () => undefined,
+		effect: () => () => {},
 		slots: {
 			inject: (key, callback) => { callback(); return () => {} },
-			register: (options, component) => { fallbackRegistered = { options, component }; return () => {} },
+			register: (options, component) => {
+				if (options.name === 'settings.section') fallbackRegistered = { options, component }
+				return () => {}
+			},
 		},
 	})
 	const fallbackProps = fallbackRegistered.options.inject()
@@ -357,6 +459,354 @@ async function main() {
 	check('fallback keeps the destructive styling', fallbackButtons.some((button) => /as-danger/.test(String(button.props.className))))
 	check('fallback renders a real search input', byType(fallbackTree, 'input').length === 1 && byType(fallbackTree, 'input')[0].props.type === 'search')
 	check('fallback still lists the rows', allText(fallbackTree).includes('单元测试会话'), allText(fallbackTree))
+
+	// 5. the catalog refresh reaches the shipped client service ---------------
+	// `sessions.refresh()` is the shell's own "re-pull the session list" call;
+	// the plugin must use it instead of inventing a second source of truth.
+	let serviceRefreshes = 0
+	const serviceCtx = {
+		get: (name) => (name === 'sessions' ? { refresh: async () => { serviceRefreshes += 1 } } : undefined),
+		slots,
+		effect: () => () => {},
+	}
+	loaded.exports.apply(serviceCtx)
+	const serviceProps = registered.options.inject()
+	const refreshed = await serviceProps.api.refreshSessionCatalog()
+	check('catalog refresh pulls the shipped sessions service', refreshed === true && serviceRefreshes === 1, `${refreshed}/${serviceRefreshes}`)
+	check('catalog refresh without the service is a quiet no-op', (await props.api.refreshSessionCatalog()) === false)
+
+	// 6. the session-row menu (`...` + right-click) ---------------------------
+	// The slot contract the shell actually uses: props `{ sessionId, displayTitle }`
+	// plus `useMenuOpenState` injected as a prop, and the shell's own list service
+	// for a row's `cwd`.
+	const menuSlot = mounted.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+	check('row menu registers under the row-menu slot id', menuSlot !== undefined && menuSlot.options.id === 'archived-sessions.reveal-folder', menuSlot?.options.id)
+	check('row menu keeps an order after the shipped items', menuSlot.options.order === 500, String(menuSlot.options.order))
+
+	let describeCalls = 0
+	const menuState = [true, () => {}]
+	void describeCalls
+	let opened = null
+	let rowHostDeletes = 0
+	let rowDescribeCalls = 0
+	let rowCatalogRefreshes = 0
+	// The shell's own session list, as the row menu sees it: `list.getSnapshot`
+	// answers `cwd`, and `refresh` is the "re-pull the catalog" call the plugin
+	// makes after a delete.
+	const rowService = {
+		list: { getSnapshot: () => ({ byId: { 'session-aaa': { cwd: 'D:\\Workspace\\DeepSeek Harness' } } }) },
+		refresh: async () => { rowCatalogRefreshes += 1 },
+	}
+	const rowFetch = async (url, init) => {
+		const body = init && typeof init.body === 'string' ? JSON.parse(init.body) : {}
+		// The host envelope is `{ ok, value }`; `callHost` throws on anything else.
+		if (url === '/archived-sessions/api/delete') {
+			rowHostDeletes += 1
+			return { ok: true, status: 200, json: async () => ({ ok: true, value: { trashedTo: `C:\\trash\\stamp__${body.sessionId}` } }) }
+		}
+		if (url === '/archived-sessions/api/describe') {
+			rowDescribeCalls += 1
+			return { ok: true, status: 200, json: async () => ({ ok: true, value: { sessionId: body.sessionId, cwd: null, archived: false, live: false, logsMissing: false } }) }
+		}
+		throw new Error(`unexpected route ${url}`)
+	}
+	const rowBundle = loadBundle(true, true, rowFetch)
+	const rowMounted = []
+	rowBundle.exports.apply({
+		get: (name) => {
+			if (name === 'sessions') return rowService
+			if (name === 'remote') return { session: { openWorkspacePath: async (arg) => { opened = arg } } }
+			return undefined
+		},
+		effect: (callback) => { callback(); return () => {} },
+		slots: {
+			inject: (key, callback) => { callback(); return () => {} },
+			register: (options, component) => { rowMounted.push({ options, component }); return () => {} },
+		},
+	})
+	const rowMenuSlot = rowMounted.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+	check('row menu registers on its own bundle too', rowMenuSlot !== undefined, String(rowMounted.length))
+	const rowProps = rowMenuSlot.options.inject({ sessionId: 'session-aaa' })
+	check('row menu inject exposes actions and the row id', typeof rowProps.actions?.describe === 'function' && rowProps.sessionId === 'session-aaa', Object.keys(rowProps).join(','))
+	check('row menu inject carries no settings-page api', rowProps.api === undefined, String(rowProps.api))
+	// The host describe route is what the menu calls through `actions`; the fetch
+	// stub above answers it, so no transport patch is needed here.
+	const menuHarness = createHarness(rowMenuSlot.component, Object.assign({}, rowProps, { useMenuOpenState: () => menuState }))
+	menuHarness.render()
+	await tick()
+	await tick()
+	const menuTree = menuHarness.render()
+	const menuLabels = allText(menuTree)
+	check('row menu asks the host to describe the session', rowDescribeCalls === 1, String(rowDescribeCalls))
+	check('row menu offers 打开文件夹 and 删除任务', /打开文件夹/.test(menuLabels) && /删除任务/.test(menuLabels), menuLabels.slice(0, 120))
+	check('row menu does not offer the settings-page restore action', !/恢复/.test(menuLabels), menuLabels.slice(0, 120))
+
+	// A closed menu must not spend a host call per rendered row.
+	rowDescribeCalls = 0
+	const closedHarness = createHarness(rowMenuSlot.component, Object.assign({}, rowProps, { useMenuOpenState: () => [false, () => {}] }))
+	closedHarness.render()
+	await tick()
+	check('closed row menu costs no host call', rowDescribeCalls === 0, String(rowDescribeCalls))
+
+	// A host half that has not been reloaded yet answers 404 for `/describe`
+	// (module caching is keyed by URL, so this is the normal state right after
+	// an upgrade and before a restart). The row must not go dead: the shell's own
+	// list snapshot still carries `cwd`, and an unavailable liveness answer must
+	// not be read as "running" — otherwise every row would show a greyed delete.
+	const staleBundle = loadBundle(true, true, async (url) => {
+		if (url === '/archived-sessions/api/describe') {
+			return { ok: false, status: 404, json: async () => ({ ok: false, error: 'not found' }) }
+		}
+		throw new Error(`unexpected route ${url}`)
+	})
+	const staleMounted = []
+	staleBundle.exports.apply({
+		get: (name) => {
+			if (name === 'sessions') return rowService
+			if (name === 'remote') return { session: { openWorkspacePath: async () => {} } }
+			return undefined
+		},
+		effect: (callback) => { callback(); return () => {} },
+		slots: { inject: (key, callback) => { callback(); return () => {} }, register: (options, component) => { staleMounted.push({ options, component }); return () => {} } },
+	})
+	const staleSlot = staleMounted.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+	const staleProps = staleSlot.options.inject({ sessionId: 'session-aaa' })
+	const staleHarness = createHarness(staleSlot.component, Object.assign({}, staleProps, { useMenuOpenState: () => [true, () => {}] }))
+	staleHarness.render()
+	await tick()
+	await tick()
+	const staleTree = staleHarness.render()
+	const staleText = allText(staleTree)
+	const staleReveal = findByText(staleTree, '打开文件夹')
+	check('stale host still offers 打开文件夹 from the client snapshot', staleReveal !== null && staleReveal.props.disabled !== true, staleText.slice(0, 120))
+	const staleDelete = findByText(staleTree, '删除任务')
+	check('an unanswered liveness probe does not grey out delete', staleDelete !== null && staleDelete.props.disabled !== true, staleText.slice(0, 120))
+
+	// Deleting from the row menu is a two-step action: the first click only arms
+	// the entry (relabelled 确认删除), the second one runs the host route, and
+	// only then does the catalog get re-pulled. The menu calls the actions object
+	// the bundle built, so the host transport underneath it is what gets stubbed.
+	const realRowProps = rowMenuSlot.options.inject({ sessionId: 'session-aaa' })
+	const menuDeleteHarness = createHarness(rowMenuSlot.component, Object.assign({}, realRowProps, { useMenuOpenState: () => [true, () => {}] }))
+	menuDeleteHarness.render()
+	await tick()
+	await tick()
+	const deleteItem = findByText(menuDeleteHarness.render(), '删除任务')
+	check('row menu renders a 删除任务 control', deleteItem !== null, String(deleteItem))
+	await deleteItem.props.onClick()
+	await tick()
+	check('row-menu delete only arms on the first click', rowHostDeletes === 0, String(rowHostDeletes))
+	await tick()
+	const armedItem = findByText(menuDeleteHarness.render(), '确认删除')
+	check('first click relabels the entry to 确认删除', armedItem !== null, allText(menuDeleteHarness.render()).slice(0, 120))
+	await armedItem.props.onClick()
+	await tick()
+	await tick()
+	await tick()
+	check('second click runs the delete and re-pulls the catalog', rowHostDeletes === 1 && rowCatalogRefreshes === 1, `${rowHostDeletes}/${rowCatalogRefreshes}`)
+
+	// 7. the batch-operations panel -------------------------------------------
+	// A rail panel is two registrations sharing one id: the `main` body (keyed by
+	// the id the rail selects) and the `sidebar.panellist` button. The panel body
+	// lists the shell's own session catalog, so the harness hands it a `sessions`
+	// service whose snapshot is the list under test.
+	let batchDeletes = 0
+	let batchRestores = 0
+	let batchArchives = 0
+	let batchCatalogRefreshes = 0
+	const batchSessions = {
+		list: {
+			getSnapshot: () => ({
+				byId: {
+					'session-one': { title: '第一个会话', cwd: 'D:\\Work\\one', updatedAt: 2 },
+					'session-two': { title: '第二个会话', cwd: 'D:\\Work\\two', updatedAt: 1, running: true },
+				},
+			}),
+		},
+		refresh: async () => { batchCatalogRefreshes += 1 },
+	}
+	const batchFetch = async (url, init) => {
+		const body = init && typeof init.body === 'string' ? JSON.parse(init.body) : {}
+		if (url === '/archived-sessions/api/delete') {
+			batchDeletes += 1
+			return { ok: true, status: 200, json: async () => ({ ok: true, value: { trashedTo: `C:\\trash\\stamp__${body.sessionId}` } }) }
+		}
+		if (url === '/archived-sessions/api/restore') {
+			batchRestores += 1
+			return { ok: true, status: 200, json: async () => ({ ok: true, value: {} }) }
+		}
+		if (url === '/archived-sessions/api/list' || url === '/archived-sessions/api/describe') {
+			return { ok: true, status: 200, json: async () => ({ ok: true, value: [] }) }
+		}
+		throw new Error(`unexpected route ${url}`)
+	}
+	const batchWorkspaces = {
+		useWorkspaces: (selector) => selector({ items: [], archivedSessionIds: [], liveSessionIds: [] }),
+		archiveSession: async () => { batchArchives += 1 },
+	}
+	const batchBundle = loadBundle(true, true, batchFetch)
+	const batchMounted = []
+	const batchCtx = {
+		get: (name) => {
+			if (name === 'sessions') return batchSessions
+			if (name === 'workspaces') return batchWorkspaces
+			return undefined
+		},
+		effect: (callback) => { callback(); return () => {} },
+		slots: {
+			inject: (key, callback) => { callback(); return () => {} },
+			register: (options, component) => { batchMounted.push({ options, component }); return () => {} },
+		},
+	}
+	batchBundle.exports.apply(batchCtx)
+	const panelButton = batchMounted.find((entry) => entry.options.name === 'sidebar.panellist')
+	const panelBody = batchMounted.find((entry) => entry.options.name === 'main')
+	check('batch panel registers a sidebar rail entry', panelButton !== undefined && panelButton.options.id === 'archived-sessions.batch', panelButton?.options.id)
+	check('batch panel rail entry carries the locale label', typeof panelButton.options.label === 'function' && panelButton.options.label() === '批量操作', typeof panelButton.options.label)
+	check('batch panel body registers in main under the same key', panelBody !== undefined && panelBody.options.key === 'archived-sessions.batch', String(panelBody?.options.key))
+	check('batch panel rail renders an icon without text', panelButton.component({}) !== null && allText(panelButton.component({})) === '', allText(panelButton.component({})).slice(0, 40))
+	const panelProps = panelBody.options.inject()
+	const panelHarness = createHarness(panelBody.component, panelProps)
+	panelHarness.render()
+	await tick()
+	await tick()
+	const panelTree = panelHarness.render()
+	const panelText = allText(panelTree)
+	check('batch panel lists the shell catalog', /第一个会话/.test(panelText) && /第二个会话/.test(panelText), panelText.slice(0, 140))
+	check('batch panel starts with nothing selected', /已选择 0 个会话/.test(panelText), panelText.slice(0, 140))
+	// Liveness must come from the catalog entry (`summary.running`), which is what
+	// the sidebar's own rows read — the workspace snapshot has no such list, and
+	// grading off a nonexistent one would tag nothing and let a running session be
+	// selected for a delete the host answers with 409.
+	check('batch panel tags a running session from its catalog entry', /运行中/.test(panelText), panelText.slice(0, 160))
+	const boxes = collect(panelTree, (item) => item.type === 'input' && item.props?.type === 'checkbox')
+	check('batch panel renders one checkbox per session', boxes.length === 2, String(boxes.length))
+	const selectAllButton = findByText(panelTree, '全选')
+	check('batch panel offers a select-all control', selectAllButton !== null, String(selectAllButton))
+	await selectAllButton.props.onClick()
+	await tick()
+	const selectedTree = panelHarness.render()
+	check('select all marks every row', /已选择 2 个会话/.test(allText(selectedTree)), allText(selectedTree).slice(0, 140))
+	// Deleting in bulk is gated the same way the row menu is: the first click on
+	// the destructive action only asks, the second one runs it.
+	const bulkDelete = findByText(selectedTree, '删除所选')
+	check('batch panel renders the destructive action', bulkDelete !== null, String(bulkDelete))
+	await bulkDelete.props.onClick()
+	await tick()
+	check('batch delete does not run on the first click', batchDeletes === 0, String(batchDeletes))
+	const armedTree = panelHarness.render()
+	const armText = allText(armedTree)
+	check('batch delete labels the confirmation', /确认删除 2 个会话/.test(armText), armText.slice(0, 160))
+	const armButton = findByText(armedTree, '确认删除 2 个会话')
+	await armButton.props.onClick()
+	await tick()
+	await tick()
+	await tick()
+	check('batch delete runs once per selected session', batchDeletes === 2, String(batchDeletes))
+	check('batch run re-pulls the session catalog', batchCatalogRefreshes >= 1, String(batchCatalogRefreshes))
+	const doneText = allText(panelHarness.render())
+	check('batch panel reports the outcome', /已完成 2 个会话/.test(doneText), doneText.slice(0, 160))
+	// A pending delete confirmation states a count, so changing the selection
+	// must disarm it — the label can never describe a different set than the one
+	// the next click would run over.
+	const disarmTree = panelHarness.render()
+	await findByText(disarmTree, '全选').props.onClick()
+	await tick()
+	await findByText(panelHarness.render(), '删除所选').props.onClick()
+	await tick()
+	check('batch delete arms on the first click', /确认删除 2 个会话/.test(allText(panelHarness.render())), allText(panelHarness.render()).slice(0, 140))
+	await findByText(panelHarness.render(), '清空选择').props.onClick()
+	await tick()
+	const disarmedText = allText(panelHarness.render())
+	check('changing the selection disarms a pending delete', /删除所选/.test(disarmedText) && !/确认删除/.test(disarmedText), disarmedText.slice(0, 160))
+	// Two clicks landing before React re-renders the disabled buttons must not
+	// start a second loop over the same selection. The guard has to be
+	// synchronous (a ref), or the duplicate click deletes every row twice.
+	const beforeReentry = batchDeletes
+	await findByText(panelHarness.render(), '全选').props.onClick()
+	await tick()
+	await findByText(panelHarness.render(), '删除所选').props.onClick()
+	await tick()
+	const armedTwice = findByText(panelHarness.render(), '确认删除 2 个会话')
+	const firstClick = armedTwice.props.onClick()
+	const secondClick = armedTwice.props.onClick()
+	await Promise.all([firstClick, secondClick])
+	await tick()
+	await tick()
+	await tick()
+	check('a duplicate confirm click does not run the batch twice', batchDeletes - beforeReentry === 2, `${batchDeletes - beforeReentry} (expected 2)`)
+	// Restore and archive share the same runner; archive has no plugin host
+	// route, so it must go through the shipped workspaces service.
+	const again = panelHarness.render()
+	await findByText(again, '全选').props.onClick()
+	await tick()
+	await findByText(panelHarness.render(), '恢复所选').props.onClick()
+	await tick()
+	await tick()
+	await tick()
+	check('batch restore calls the host once per session', batchRestores === 2, String(batchRestores))
+	await findByText(panelHarness.render(), '全选').props.onClick()
+	await tick()
+	await findByText(panelHarness.render(), '归档所选').props.onClick()
+	await tick()
+	await tick()
+	await tick()
+	check('batch archive goes through the shipped workspaces service', batchArchives === 2, String(batchArchives))
+
+	// 8. right-click wiring --------------------------------------------------
+	// The row's own attribute is the only handle the plugin gets; the delegated
+	// listener must claim session rows and ignore everything else.
+	const handlers = []
+	const rightClickDocument = {
+		addEventListener: (type, handler) => handlers.push({ type, handler }),
+		removeEventListener: () => {},
+		createElement: (tag) => ({ tag, setAttribute() {}, remove() {} }),
+		body: { appendChild: () => {} },
+		getElementById: () => null,
+		head: { appendChild: () => {} },
+	}
+	const rightClickBundle = loadBundle()
+	const seen = []
+	const rightClickWindow = { __ModuleLoader__: { load: () => {} } }
+	void rightClickWindow
+	const rightSource = fs.readFileSync(CLIENT, 'utf8')
+	const rightCaptured = { load: null }
+	const rightRun = new Function('window', 'require', 'document', 'fetch', rightSource)
+	rightRun({ __ModuleLoader__: { load: (mod) => { rightCaptured.load = mod } } }, (name) => {
+		if (name === 'react') return ReactStub
+		if (name === 'react-dom/client') return ReactDomStub
+		if (name === '@deepseek-ai/dsh-client-ui-primitives') return PrimitivesStub
+		throw new Error(name)
+	}, rightClickDocument, async () => { throw new Error('unexpected fetch') })
+	rightCaptured.load.factory((name) => {
+		if (name === 'react') return ReactStub
+		if (name === 'react-dom/client') return ReactDomStub
+		if (name === '@deepseek-ai/dsh-client-ui-primitives') return PrimitivesStub
+		throw new Error(name)
+	}).apply({
+		get: () => undefined,
+		effect: (callback) => { callback(); return () => {} },
+		slots: { inject: (key, callback) => { callback(); return () => {} }, register: () => () => {} },
+	})
+	const contextHandler = handlers.find((entry) => entry.type === 'contextmenu')
+	check('right-click installs a delegated contextmenu listener', contextHandler !== undefined, JSON.stringify(handlers.map((h) => h.type)))
+	const rowElement = (key) => ({ closest: () => (key === null ? null : { dataset: { rowKey: key } }) })
+	let prevented = 0
+	contextHandler.handler({
+		button: 2,
+		defaultPrevented: false,
+		target: rowElement('session:session-aaa'),
+		clientX: 10,
+		clientY: 20,
+		preventDefault: () => { prevented += 1 },
+	})
+	check('right-click on a session row is claimed', prevented === 1, String(prevented))
+	let untouched = 0
+	contextHandler.handler({ button: 2, defaultPrevented: false, target: rowElement('workspace:ws-1'), clientX: 0, clientY: 0, preventDefault: () => { untouched += 1 } })
+	contextHandler.handler({ button: 0, defaultPrevented: false, target: rowElement('session:session-aaa'), clientX: 0, clientY: 0, preventDefault: () => { untouched += 1 } })
+	contextHandler.handler({ button: 2, defaultPrevented: true, target: rowElement('session:session-aaa'), clientX: 0, clientY: 0, preventDefault: () => { untouched += 1 } })
+	check('right-click leaves non-session rows and other menus alone', untouched === 0, String(untouched))
+	void seen
 
 	report()
 }
