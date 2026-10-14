@@ -2,6 +2,22 @@
 
 版本号与 `package.json` 的 `version` 一致，每个版本对应一个 git tag（`git tag -l`）。每个小节可以直接当作 GitHub Release 的正文。
 
+## v1.0.3 — 2026-10-14
+
+修复 v1.0.2 误判的那个整机级故障：真正的成因不是 `dsh.profile.bundles` 登记被摘，而是浏览器半边在激活时抛了异常。
+
+### 修复
+
+- **「打开文件夹」解析 `remote.session` 的方式改对了**（`lib/client.js` 的 `sessionRemote`）。旧实现先 `ctx.get("remote")` 拿到命名空间，再用属性访问取 `.session`；cordis 把 `remote.session` 作为**生成的成员**下发，属性访问要求该**点号名**出现在 fiber 自己的 `inject` 里，而本插件只声明了 `"remote"`，于是抛 `cannot get property "remote.session" without inject`。这个异常从 `createRowActions` 一路逃出 `apply`，fiber 落到 `FAILED`；DSH 随后重新激活它，客户端启动审计恰好在这次重试窗口里采样到 `LOADING`，于是整页抛 `web boot: 1 entry did not activate\ndsh-archived-sessions: loading`，主进程把它记为 `web-boot` 致命错误并弹框、应用进不去——**与 profile 登记无关，只要插件被挂载就必然复现**，这正是 v1.0.2 归因错误的地方（`repair` 补登记对它无效，因为它本来就没丢登记）。
+  现在读点号名走 `ctx.get("remote.session")`：cordis 的 `ctx.get` 本就按「不带 inject 要求」读服务（源码注释原话 *Read a service from the store without the inject requirement*），实测返回带 `openWorkspacePath` 的服务对象。**没有**把 `"remote.session"` 加进 `inject`——服务缺席时那会让 fiber 永久停在 `pending`，同样过不了启动审计。顺带把「打开文件夹」从「解析不到、直接置灰」恢复成可用。
+- 逐处复核了同一条链路上其余的服务读取：`restoreViaService`、`refreshSessionCatalog`、`archiveViaService`、行菜单的 `listEntry` 本来就是「只 `ctx.get`、拿到对象后才判方法」的写法，只有 `sessionRemote` 在 `get` 之后多做了一次属性访问，无需再改。
+
+### 验证
+
+- 在隔离 profile（`DSH_HOME` 指向复制的 profile 副本 + `dsh --profile web`）里复现了原故障：headless Chrome 的控制台抓到与桌面端崩溃日志逐字相同的 `Error: web boot: 1 entry did not activate\ndsh-archived-sessions: loading`（`assets/index-5SrrfWpU.js:126`）。修好后同一环境**不再出现该错误**，其余插件照常激活。
+- `node tools/test-client.cjs` → **98/98**：新增 3 项回归检查——用一个在 `remote` 上定义「读 `session` 就抛 `cannot get property "remote.session" without inject`」的访问器来复刻 cordis 的真实形态，断言 `apply` 不抛、行菜单仍注册、「打开文件夹」仍可用；两处服务桩由 `remote` 改为 `remote.session`（按真实服务拓扑，`remote` 只是命名空间）。
+- `node tools/test-setup.cjs` → 11/11、`node tools/test-host.cjs` → 27/27。
+
 ## v1.0.1 — 2026-10-12
 
 修复「在设置页删除已归档会话后，该会话又在工作区/侧边栏里冒出来」这一缺陷。

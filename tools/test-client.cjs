@@ -515,7 +515,7 @@ async function main() {
 	rowBundle.exports.apply({
 		get: (name) => {
 			if (name === 'sessions') return rowService
-			if (name === 'remote') return { session: { openWorkspacePath: async (arg) => { opened = arg } } }
+			if (name === 'remote.session') return { openWorkspacePath: async (arg) => { opened = arg } }
 			return undefined
 		},
 		effect: (callback) => { callback(); return () => {} },
@@ -563,7 +563,7 @@ async function main() {
 	staleBundle.exports.apply({
 		get: (name) => {
 			if (name === 'sessions') return rowService
-			if (name === 'remote') return { session: { openWorkspacePath: async () => {} } }
+			if (name === 'remote.session') return { openWorkspacePath: async () => {} }
 			return undefined
 		},
 		effect: (callback) => { callback(); return () => {} },
@@ -604,6 +604,40 @@ async function main() {
 	await tick()
 	await tick()
 	check('second click runs the delete and re-pulls the catalog', rowHostDeletes === 1 && rowCatalogRefreshes === 1, `${rowHostDeletes}/${rowCatalogRefreshes}`)
+
+	// The reveal-folder lookup must read the dotted service name through `ctx.get`.
+	// Cordis serves `remote.session` through an accessor that requires the dotted
+	// name in the fiber's own `inject`, so reading it as `ctx.get('remote').session`
+	// throws. That throw escaped `apply`, left the fiber FAILED, and the client
+	// boot audit aborted the whole page with "web boot: 1 entry did not activate
+	// \ndsh-archived-sessions: loading". This context models that runtime shape.
+	const dottedBundle = loadBundle(true, true, rowFetch)
+	const dottedMounted = []
+	let dottedThrew = null
+	try {
+		dottedBundle.exports.apply({
+			get: (name) => {
+				if (name === 'sessions') return rowService
+				if (name === 'remote.session') return { openWorkspacePath: async () => {} }
+				if (name === 'remote') {
+					return { get session() { throw new Error('cannot get property "remote.session" without inject') } }
+				}
+				return undefined
+			},
+			effect: (callback) => { callback(); return () => {} },
+			slots: { inject: (key, callback) => { callback(); return () => {} }, register: (options, component) => { dottedMounted.push({ options, component }); return () => {} } },
+		})
+	} catch (error) { dottedThrew = error }
+	check('apply survives a throwing remote.session accessor', dottedThrew === null, String(dottedThrew))
+	const dottedSlot = dottedMounted.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+	check('the dotted accessor context still mounts the row menu', dottedSlot !== undefined, String(dottedMounted.length))
+	const dottedProps = dottedSlot.options.inject({ sessionId: 'session-aaa' })
+	const dottedHarness = createHarness(dottedSlot.component, Object.assign({}, dottedProps, { useMenuOpenState: () => [true, () => {}] }))
+	dottedHarness.render()
+	await tick()
+	await tick()
+	const dottedReveal = findByText(dottedHarness.render(), '打开文件夹')
+	check('dotted lookup keeps 打开文件夹 usable', dottedReveal !== null && dottedReveal.props.disabled !== true, allText(dottedHarness.render()).slice(0, 120))
 
 	// 7. the batch-operations panel -------------------------------------------
 	// A rail panel is two registrations sharing one id: the `main` body (keyed by

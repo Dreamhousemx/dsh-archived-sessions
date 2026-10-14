@@ -1,6 +1,6 @@
 {
   "name": "dsh-archived-sessions",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "DeepSeek Harness settings page for archived sessions: search by workspace, restore, and delete.",
   "keywords": [
