@@ -95,7 +95,7 @@ DSH 会自动重载 profile patch，**宿主半边立即生效、无需重启**�
 
 ### 随 DSH 升级 / 自身升级
 
-- **DSH 本体升级**：profile 的 `package.json` / `pnpm-lock.yaml` / `node_modules` / `cordis.patch.yml` 都会被保留（DSH 不做 profile 迁移），插件照旧生效。升级完跑一次 `status.cmd`，若 `channel` 变成 `none`，重跑 `bundle-install.cmd`（幂等）并按输出提示刷新或重启。
+- **DSH 本体升级**：profile 的 `package.json` / `pnpm-lock.yaml` / `node_modules` / `cordis.patch.yml` 都会被保留（DSH 不做 profile 迁移），插件照旧生效。升级完跑一次 `status.cmd`，若 `channel` 变成 `none`，重跑 `bundle-install.cmd`（幂等）并按输出提示刷新或重启。**另外：任何时候用 DSH 的插件管理器装/卸了别的插件，也跑一次 `status.cmd`——若显示 `bundles : NOT listed in dsh.profile.bundles` 就跑 `repair.cmd`**（成因见下面「装了、却"整机启动失败"」一节）。
 - **插件自身升级**：`link:` 安装方式下改源码即可；宿主半边重新导入需要重启一次 DSH，浏览器半边刷新页面即可。若改了 `package.json` 或 `cordis.patch.yml`，再跑一次 `bundle-install.cmd` 让 pnpm 重新解析（并让 HMR 重挂）。
 
 ## 使用
@@ -108,10 +108,14 @@ DSH 会自动重载 profile patch，**宿主半边立即生效、无需重启**�
 
 ```
 status.cmd                       :: 安装渠道、联接/依赖、loader 记录、宿主路由、客户端 bundle 注册情况
+repair.cmd                       :: 修复「依赖在、但 dsh.profile.bundles 里的登记被我 DSH 自己弄丢了」（见下文）
 node tools\verify-live.cjs       :: 只读探活：ping / list / 客户端 bundle 是否真的能取到
 node tools\test-host.cjs         :: 宿主半边隔离单测：27 项，临时 DSH_HOME，不碰真实数据
 node tools\test-client.cjs       :: 浏览器半边离线单测：95 项，自带最小 React，真实调用组件并检查元素树
+node tools\test-setup.cjs        :: 安装器隔离单测：11 项，临时 profile 目录，只验证 repair 的读写与拒绝
 ```
+
+`test-setup.cjs` 覆盖：`repair` 能把被 `reconcile` 丢掉的登记补回来、补在末尾而不打乱既有顺序、已被登记时**一个字节都不写**（幂等）、依赖不存在 / 包自己没声明 `dsh.bundle.patch` / `node_modules` 里没有该目录时明确拒绝、跟随联接读到真实元数据、保留 manifest 里无关字段与原有缩进换行格式、以及 `bundleState` 对「装了但没登记」这个恰好需要 repair 的状态判定准确。
 
 `test-host.cjs` 覆盖：ping（含客户端 bundle 上报的三种状态）、list 的字段合并、信任围栏（跨站 / 陌生 Host / trustedHosts / `Origin: null` / Origin 不匹配 / 匹配）、非法会话 ID 400、未知路径 404、错误方法 405、恢复、运行中删除 409、删除（分离工作区记账 + 日志与投影缓存移入回收站）、**删除绝不取消归档（否则会话会被"恢复"回工作区）**、**被删除的会话在 list 里仍带 `logsMissing: true`**、未归档会话删除、日志目录缺失时的删除、**`describe` 返回单个会话的 `cwd` / 归档 / 运行中 / 日志缺失事实（行菜单据此决定按钮是否置灰）**。
 
@@ -148,6 +152,31 @@ revert.cmd
 - `dsh plugin` 是「纯 pnpm 转发」：**pnpm 失败时不会回滚 `pnpm-lock.yaml`**（内存快照回滚只存在于应用内的 `install_bundle` 服务）。所以安装失败后先把备份的 `pnpm-lock.yaml` 复制回去再用 `bundle-install.cmd` 重试。
 - 刚 `bundle-remove` 就立刻 `bundle-install`，Windows 上可能因联接尚未释放而报 symlink 失败（pnpm `forceSymlink`）；等几秒重试，或重启 DSH 后再装。
 
+### 装了、却“整机启动失败”（`web boot: 1 entry did not activate — dsh-archived-sessions: loading`）
+
+**症状**：桌面版一启动就弹错误框「部分插件或配置可能损坏，请关闭应用并重新安装」，崩溃日志（`%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-*-web-boot.log`）里写着 `Error: web boot: 1 entry did not activate` 并指名 `dsh-archived-sessions: loading`；`status.cmd` 则显示 `bundles : NOT listed in dsh.profile.bundles`，而依赖和联接都好好的。
+
+**成因（DSH 本体的缺陷，不是插件坏了）**：`@deepseek-ai/dsh-plugin-manager` 在**每一次**成功的 pnpm 操作后都会用 `reconcile`（`lib/index.js:238-266`）重写 `dsh.profile.bundles`。它对每个已登记的包名调用 `bundleManifest(name, dir, anchor)`（同文件 `226-229`）确认「还能解析到一个声明了 `dsh.bundle.patch` 的包吗」，**解析不到就静默把名字从列表里删掉**：
+
+```js
+const bundles = previous.filter((name) => {
+  if (!beforeDeps.has(name) && !dependencies.includes(name)) return true;
+  return dependencies.includes(name) && bundleManifest(name, dir, anchor) !== void 0;
+});
+```
+
+而紧随其后的补登记循环（同文件 `247-256`）只处理 `dependencies` 里**新增**的名字（`if (beforeDeps.has(name)) continue`）——所以被删掉的老名字永远不会自动回来。触发窗口是 pnpm 自己的 `-N` 卸载：它先解开 profile `node_modules` 里的联接、再重新链上，而 `reconcile` 正好在那个「联接暂时不存在」的瞬间读盘。于是：**装别的插件（哪怕完全无关，例如 `dsh-mcp-connector`，日志里那次是 `Packages: +7 -28`）→ 本插件的联接恰好不在 → 登记被永久摘除**。依赖仍在、`node_modules` 联接仍在，但 profile 再也不会挂载它，loader 里那一项就卡在 `loading`，整个 web boot 因此失败。
+
+**修复**：
+
+```
+repair.cmd            :: 只补回被 reconcile 丢掉的那一半登记，不跑 pnpm
+```
+
+它做的事与 `reconcile` 的判据完全对齐：只有当**依赖存在**、**`node_modules` 里那个包能被读到**、**且它自己声明了 `dsh.bundle.patch`** 时，才把包名补回 `dsh.profile.bundles` 末尾；任一条件不满足都会明确报错而不是写一个挂不起来的名字。幂等——已登记时不写一个字节。写完 profile 的 `package.json` 变化会被 HMR 监听到并自动重载，**通常不用重启**（`status.cmd` 里的 `channel` 会变成 `bundle (official)`、`server` 变成 `plugin route mounted`）。
+
+> 建议：以后用 DSH 的插件管理器装/卸任何插件之后，跑一次 `status.cmd`；若 `channel` 不是预期的渠道，`repair.cmd` 一下即可。这一点已在上面「随 DSH 升级 / 自身升级」一节里提过——现在有了专门的命令。
+
 ## 删除策略（重要）
 
 删除**不是**从任何注册表里抹掉记录——DSH 没有这个能力。本插件的删除是一次「安全下架 + 移入回收站」：
@@ -172,11 +201,13 @@ package.json          dsh.bundle.patch + dsh.client（platform: web, exports["./
 cordis.patch.yml      bundle 自带的 loader 记录（官方包路线靠它挂载；本地路线用 profile 的 patch）
 lib/index.js          宿主半边：注册 GET/POST /archived-sessions/api/{ping,list,restore,delete,describe}
 lib/client.js         浏览器半边：导出的 ESM bundle，注册设置页、会话行菜单（`...` 与右键）与「批量操作」侧边栏面板
-lib/setup.cjs         install / revert / bundle-install / bundle-remove / status 的全部逻辑（.cmd 只负责找 node 与 dsh 并调用它）
+lib/setup.cjs         install / revert / bundle-install / bundle-remove / repair / status 的全部逻辑（.cmd 只负责找 node 与 dsh 并调用它）
 install.cmd revert.cmd status.cmd          本地 patch 路线 + 状态报告
 bundle-install.cmd bundle-remove.cmd       官方包路线（调用 dsh plugin … add/remove）
+repair.cmd                                 补回被 DSH 的 reconcile 摘掉的 dsh.profile.bundles 登记
 tools/test-host.cjs   宿主半边隔离单测
 tools/test-client.cjs 浏览器半边离线单测（最小 React 桩）
+tools/test-setup.cjs  安装器隔离单测（临时 profile 目录）
 tools/verify-live.cjs 对运行中的实例做只读验证
 CHANGELOG.md          版本变更记录（每个版本对应一个 git tag）
 ```
