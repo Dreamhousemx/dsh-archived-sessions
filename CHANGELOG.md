@@ -17,6 +17,20 @@
 - 真实浏览器驱动验证（headless Chrome + CDP，`dsh --profile web`）：批量面板从 **34 行降到 9 行**（全部为已归档会话）；9 个复选框中 **8 个禁用**（日志已在回收站）；列表 `scrollHeight 674 > clientHeight 582` 且 `overflow-y:auto`，可滚动；设置页在打开「已归档会话」的连续四次采样中**均未出现「未归属工作区」**。
 - `node tools/test-setup.cjs` → 11/11、`node tools/test-host.cjs` → 27/27。
 
+## v1.0.8 — 2026-10-14
+
+### 修复
+
+- **已删除的会话彻底不再出现在列表里**。上一版让宿主把「日志已进回收站」的已归档 id 标为 `logsMissing` 交给前端过滤，这一版改为**宿主直接不返回它们**——`listArchivedSessions` 在 `logsMissing` 时 `continue`。原因是这类行在**两个**入口都必须消失：设置页与批量面板，而前端过滤只在设置页生效。
+- **`isDeleted` 对「宿主没返回这一行」的判定反了**。这是上一版引入的回归：宿主曾把幽灵行带着 `logsMissing: true` 发出来，前端据此丢弃；宿主改为**完全不发**之后，`hostById.get(sessionId)` 变成 `undefined`，而 `undefined?.logsMissing === true` 与 `undefined?.directory === null` **都为 false**，于是幽灵行反而被判为「未删除」而画了出来。判据补上第三种情形：**已归档 id 在宿主列表里根本没有对应行 = 已删除**（宿主已经判断过并丢弃了它，不是「未知」）。实测设置页的裸 ID 从 18 个降到 2 个，且剩下这 2 个是同一个**真实**已归档会话（无投影缓存，标题按设计回退成 ID）。
+
+### 验证
+
+- `node tools/test-client.cjs` → **111/111**。原「snapshot alone keeps the session listed」「snapshot-only row falls back to the session id as its title」两条**断言的是缺陷行为本身**（快照里的 id 即使宿主不认也要画出来、标题退化成裸 ID），已改为反向断言：宿主省略的已归档 id **不列出行、不画行、不产生标题节点**；另新增「宿主行携带 `logsMissing` 时不列出」的检查。
+- `node tools/test-host.cjs` → **27/27**。原「a deleted session is listed as archived with its log missing」断言 `row.logsMissing === true`，改为「a deleted session leaves the archived list entirely」断言 `row === undefined`。
+- 真实浏览器驱动验证（headless Chrome + CDP，`dsh --profile web`，端口 19605）：设置页「已归档会话」的连续三次采样**全部 clean**，不再出现「未归属工作区」；页面文本里的裸会话 ID 计数 **18 → 2**；宿主 `/list` 返回 **1** 条（该端口还有的幽灵行全部消失）。
+- `node tools/test-setup.cjs` → 11/11。
+
 ## v1.0.6 — 2026-10-14
 
 ### 修复

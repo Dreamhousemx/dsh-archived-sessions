@@ -423,11 +423,16 @@ async function main() {
 	check('deleted row announces the trash path', allText(deletedTree).includes('sessions-trash'), allText(deletedTree).slice(0, 160))
 	hostRows = []
 
-	// the workspace snapshot alone still lists a session the host route omits
+	// A session the host left out of its list is deleted, not unknown. The host
+	// drops a ghost (an archived id whose log and projection cache both went to
+	// the trash) rather than reporting it, so the client snapshot can no longer
+	// resurrect it as a row titled by its raw session id under 未归属工作区.
 	const snapshotOnly = await renderWith([])
-	const titleNode = collect(snapshotOnly, (item) => item.props.className === 'as-title')[0]
-	check('snapshot alone keeps the session listed', allText(snapshotOnly).includes('session-aaa'), allText(snapshotOnly))
-	check('snapshot-only row falls back to the session id as its title', Boolean(titleNode) && allText(titleNode) === 'session-aaa', allText(titleNode))
+	check('an archived id the host omits is not listed',
+		allText(snapshotOnly).includes(props.messages.empty) && !allText(snapshotOnly).includes('session-aaa'), allText(snapshotOnly))
+	check('an archived id the host omits renders no row', collect(snapshotOnly, (item) => item.props['data-session-id'] === 'session-aaa').length === 0)
+	check('an archived id the host omits never falls back to its raw id as a title',
+		collect(snapshotOnly, (item) => item.props.className === 'as-title').length === 0)
 
 	// a session the host reports as deleted (its log is gone) must not be listed:
 	// the archive flag keeps it in the client snapshot, the host row is the only

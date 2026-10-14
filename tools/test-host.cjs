@@ -324,13 +324,14 @@ async function main() {
     assert.deepEqual(state.unarchived, [SESSION_ID], 'only the earlier restore may have called unarchiveSession')
     assert.deepEqual(state.archived, [SESSION_ID], 'the archive flag must survive the delete')
   })
-  await check('a deleted session is listed as archived with its log missing', async () => {
+  await check('a deleted session leaves the archived list entirely', async () => {
     const after = await handler({ url: '/archived-sessions/api/list', headers: trusted })
     const row = after.json.value.sessions.find((item) => item.sessionId === SESSION_ID)
-    assert.ok(row, 'the id is still archived, so the page must still see it')
-    assert.equal(row.logsMissing, true)
-    assert.equal(row.directory, null)
-    assert.equal(row.archived, true)
+    // The archive flag stays on, but `deleteSession` moved the log and the
+    // projection cache into the trash, so nothing on the live side can name this
+    // session. It used to be listed with `logsMissing: true` and the page drew it
+    // as a row titled by its raw session id under 未归属工作区.
+    assert.equal(row, undefined, 'a session whose logs are gone must not be listed')
   })
 
   // --- delete an unarchived session ---------------------------------------
