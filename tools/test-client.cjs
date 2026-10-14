@@ -599,6 +599,14 @@ async function main() {
 	await tick()
 	const armedItem = findByText(menuDeleteHarness.render(), '确认删除')
 	check('first click relabels the entry to 确认删除', armedItem !== null, allText(menuDeleteHarness.render()).slice(0, 120))
+	// Arming is not a result. The item's own label already carries the prompt,
+	// so a notice repeating it printed 确认删除 a second time as its own line
+	// between 归档会话 and 打开文件夹. Exactly one occurrence is correct.
+	const armedText = allText(menuDeleteHarness.render())
+	const armedCount = armedText.split('确认删除').length - 1
+	check('arming shows 确认删除 once, not also as a notice line', armedCount === 1, `${armedCount}x in ${armedText.slice(0, 160)}`)
+	const armedNotes = collect(menuDeleteHarness.render(), (n) => n.props && n.props.className === 'as-menu-note')
+	check('arming adds no as-menu-note line to the menu', armedNotes.length === 0, String(armedNotes.length))
 	await armedItem.props.onClick()
 	await tick()
 	await tick()

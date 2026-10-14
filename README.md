@@ -246,7 +246,7 @@ CHANGELOG.md          版本变更记录（每个版本对应一个 git tag）
 
 ## 更新日志
 
-见 [CHANGELOG.md](CHANGELOG.md)；当前版本 `1.0.5`（tag `v1.0.5`）。
+见 [CHANGELOG.md](CHANGELOG.md)；当前版本 `1.0.6`（tag `v1.0.6`）。
 
 ## 许可证
 
