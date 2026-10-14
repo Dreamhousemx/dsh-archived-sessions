@@ -342,6 +342,24 @@ async function main() {
 		workspacePath: 'D:\\Workspace\\DeepSeek Harness',
 		live: true,
 	}
+
+	// The first frame must not judge an archived id it has no facts for. Every id
+	// in the snapshot looks dead until the host answers, so drawing one before
+	// then flashed a row titled by its raw session id under 未归属工作区 and then
+	// dropped it. The page waits instead: no rows, and "reading…" rather than
+	// "nothing archived".
+	{
+		hostRows = [liveRow]
+		currentSnapshot = archivedSnapshot
+		const earlyHarness = createHarness(registered.component, { messages: props.messages, api, useWorkspaces })
+		const earlyText = allText(earlyHarness.render())
+		check('first frame draws no rows before the host list arrives', !/session-aaa/.test(earlyText) && !/单元测试会话/.test(earlyText), earlyText.slice(0, 160))
+		check('first frame does not claim the archive is empty', !/当前没有已归档的会话/.test(earlyText) && earlyText.includes(props.messages.loading), earlyText.slice(0, 160))
+		await tick()
+		const settledText = allText(earlyHarness.render())
+		check('the row appears once the host list lands', /单元测试会话/.test(settledText), settledText.slice(0, 160))
+	}
+
 	const live = await renderWith([liveRow])
 	const liveText = allText(live)
 
@@ -680,8 +698,9 @@ async function main() {
 	// 7. the batch-operations panel -------------------------------------------
 	// A rail panel is two registrations sharing one id: the `main` body (keyed by
 	// the id the rail selects) and the `sidebar.panellist` button. The panel body
-	// lists the shell's own session catalog, so the harness hands it a `sessions`
-	// service whose snapshot is the list under test.
+	// operates on the *archive*, so the host `/list` route decides which rows
+	// exist; the shell catalog only enriches those ids with a title, a cwd and
+	// liveness. Both are stubbed here so the test pins that division of labour.
 	let batchDeletes = 0
 	let batchRestores = 0
 	let batchArchives = 0
@@ -692,6 +711,10 @@ async function main() {
 				byId: {
 					'session-one': { title: '第一个会话', cwd: 'D:\\Work\\one', updatedAt: 2 },
 					'session-two': { title: '第二个会话', cwd: 'D:\\Work\\two', updatedAt: 1, running: true },
+					// Deliberately in the catalog but NOT archived: the panel must not
+					// draw it. Listing the catalog is what used to fill this panel with
+					// every session in the sidebar.
+					'session-live': { title: '不该出现的会话', cwd: 'D:\\Work\\live' },
 				},
 			}),
 		},
@@ -707,8 +730,26 @@ async function main() {
 			batchRestores += 1
 			return { ok: true, status: 200, json: async () => ({ ok: true, value: {} }) }
 		}
-		if (url === '/archived-sessions/api/list' || url === '/archived-sessions/api/describe') {
-			return { ok: true, status: 200, json: async () => ({ ok: true, value: [] }) }
+		if (url === '/archived-sessions/api/list') {
+			return {
+				ok: true,
+				status: 200,
+				json: async () => ({
+					ok: true,
+					value: {
+						sessions: [
+							{ sessionId: 'session-one', archived: true, title: null, cwd: null, live: false, directory: 'C:\\s\\one', logsMissing: false },
+							{ sessionId: 'session-two', archived: true, title: null, cwd: null, live: true, directory: 'C:\\s\\two', logsMissing: false },
+							// A ghost: archived flag set, log already in the trash. It must be
+							// listed but not selectable.
+							{ sessionId: 'session-ghost', archived: true, title: null, cwd: null, live: false, directory: null, logsMissing: true },
+						],
+					},
+				}),
+			}
+		}
+		if (url === '/archived-sessions/api/describe') {
+			return { ok: true, status: 200, json: async () => ({ ok: true, value: {} }) }
 		}
 		throw new Error(`unexpected route ${url}`)
 	}
@@ -744,21 +785,26 @@ async function main() {
 	await tick()
 	const panelTree = panelHarness.render()
 	const panelText = allText(panelTree)
-	check('batch panel lists the shell catalog', /第一个会话/.test(panelText) && /第二个会话/.test(panelText), panelText.slice(0, 140))
+	check('batch panel lists the archived sessions the host reports', /第一个会话/.test(panelText) && /第二个会话/.test(panelText), panelText.slice(0, 140))
+	check('batch panel never draws a catalog session that is not archived', !/不该出现的会话/.test(panelText), panelText.slice(0, 200))
 	check('batch panel starts with nothing selected', /已选择 0 个会话/.test(panelText), panelText.slice(0, 140))
 	// Liveness must come from the catalog entry (`summary.running`), which is what
 	// the sidebar's own rows read — the workspace snapshot has no such list, and
 	// grading off a nonexistent one would tag nothing and let a running session be
 	// selected for a delete the host answers with 409.
 	check('batch panel tags a running session from its catalog entry', /运行中/.test(panelText), panelText.slice(0, 160))
+	// Three rows come back (two live, one ghost), so three checkboxes are drawn —
+	// the ghost's is disabled. A dead session must never become selectable.
 	const boxes = collect(panelTree, (item) => item.type === 'input' && item.props?.type === 'checkbox')
-	check('batch panel renders one checkbox per session', boxes.length === 2, String(boxes.length))
+	check('batch panel renders one checkbox per archived session', boxes.length === 3, String(boxes.length))
+	const ghostBox = boxes[2]
+	check('a session whose log is gone gets a disabled checkbox', ghostBox?.props?.disabled === true, JSON.stringify(ghostBox?.props?.disabled))
 	const selectAllButton = findByText(panelTree, '全选')
 	check('batch panel offers a select-all control', selectAllButton !== null, String(selectAllButton))
 	await selectAllButton.props.onClick()
 	await tick()
 	const selectedTree = panelHarness.render()
-	check('select all marks every row', /已选择 2 个会话/.test(allText(selectedTree)), allText(selectedTree).slice(0, 140))
+	check('select all marks every selectable row and skips the ghost', /已选择 2 个会话/.test(allText(selectedTree)), allText(selectedTree).slice(0, 140))
 	// Deleting in bulk is gated the same way the row menu is: the first click on
 	// the destructive action only asks, the second one runs it.
 	const bulkDelete = findByText(selectedTree, '删除所选')
