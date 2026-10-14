@@ -639,6 +639,36 @@ async function main() {
 	const dottedReveal = findByText(dottedHarness.render(), '打开文件夹')
 	check('dotted lookup keeps 打开文件夹 usable', dottedReveal !== null && dottedReveal.props.disabled !== true, allText(dottedHarness.render()).slice(0, 120))
 
+	// A successful reveal is silent: opening the file manager is the feedback, and
+	// a notice echoing the path only printed a long line inside the menu. The
+	// failure paths still have to speak, since they have no other signal.
+	let revealOpened = null
+	const quietBundle = loadBundle(true, true, rowFetch)
+	const quietMounted = []
+	quietBundle.exports.apply({
+		get: (name) => {
+			if (name === 'sessions') return rowService
+			if (name === 'remote.session') return { openWorkspacePath: async (arg) => { revealOpened = arg } }
+			return undefined
+		},
+		effect: (callback) => { callback(); return () => {} },
+		slots: { inject: (key, callback) => { callback(); return () => {} }, register: (options, component) => { quietMounted.push({ options, component }); return () => {} } },
+	})
+	const quietSlot = quietMounted.find((entry) => entry.options.name === 'sidebar.workspaces.session.menu.item')
+	const quietProps = quietSlot.options.inject({ sessionId: 'session-aaa' })
+	const quietHarness = createHarness(quietSlot.component, Object.assign({}, quietProps, { useMenuOpenState: () => [true, () => {}] }))
+	quietHarness.render()
+	await tick()
+	await tick()
+	const quietReveal = findByText(quietHarness.render(), '打开文件夹')
+	await quietReveal.props.onClick()
+	await tick()
+	await tick()
+	await tick()
+	const quietText = allText(quietHarness.render())
+	check('a successful reveal calls openWorkspacePath', revealOpened !== null && typeof revealOpened.path === 'string', JSON.stringify(revealOpened))
+	check('a successful reveal shows no notice at all', !/打开文件夹：/.test(quietText) && !/打开文件夹:/.test(quietText), quietText.slice(0, 160))
+
 	// 7. the batch-operations panel -------------------------------------------
 	// A rail panel is two registrations sharing one id: the `main` body (keyed by
 	// the id the rail selects) and the `sidebar.panellist` button. The panel body
