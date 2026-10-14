@@ -2,6 +2,22 @@
 
 版本号与 `package.json` 的 `version` 一致，每个版本对应一个 git tag（`git tag -l`）。每个小节可以直接当作 GitHub Release 的正文。
 
+## v1.0.5 — 2026-10-14
+
+### 变更
+
+- **右键菜单改为直接打开侧边栏自己的那一个**。此前右键会弹出插件自绘的菜单，里面只有本插件提供的「打开文件夹」「删除任务」两项，而点击行尾 `...` 弹出的是 DSH 自己的菜单（置顶/重命名/分叉/归档 + 本插件两项）——同一个行上的两个入口给出两套内容，用户在右键里找不到置顶、重命名、分叉、归档。现在右键不再自绘菜单，而是**按一下该行自己的 `...` 触发按钮**，于是两个入口打开的必然是同一个菜单：内容永久一致，且以后 DSH 给行菜单加项时右键会自动跟上。
+  - 之所以不是「把 DSH 的四项抄进自绘菜单」：槽项由槽的所有者渲染，DSH 对渲染做了归属校验（`SlotOwnershipError`/`StaleAuthorizationError`），插件无法取用别的插件注册进 `sidebar.workspaces.session.menu.item` 的组件；而抄一遍文案与快捷键意味着永久跟着 DSH 改。
+  - 触发按钮的定位依赖侧边栏行的结构：行的 `rowActions` 簇（`class` 含 `rowActions`，CSS Module 保留了可读后缀）里的第一个 `button`。这是 DSH 未公开的 DOM 约定，因此 `findRowMenuTrigger` 做了两级回退（`rowActions` 簇 → 行尾 `span` 内的第一个 `button`），两级都找不到时**不做任何事**（不 `preventDefault`），把右键还给浏览器——空白行本来就没有这个按钮。
+  - 菜单现在锚定在该行的 `...` 按钮处，而不是鼠标位置：这是复用 DSH 自己菜单的必然代价。
+- 删掉随之无用的自绘菜单代码：`RowContextMenu` 组件、`mountRowMenu` 的 `ReactDOM.createRoot` 挂载、`AtomMenu` 依赖，以及 `.as-row-menu`/`.as-menu-anchor`/`.as-menu-fallback` 三条样式。`RowMenuItem`/`RowMenuItems`（`...` 菜单里那两项）保留不变。
+
+### 验证
+
+- `node tools/test-client.cjs` → **103/103**：右键相关的 5 项改为断言新契约——点中会话行时 `preventDefault` 且**恰好按了一次该行的触发按钮**；没有触发按钮的行（空白行）被完全放过；非会话行、非右键、已被处理的右键既不 `preventDefault` 也不按按钮。
+- 在隔离复现环境里用真实浏览器驱动验证（headless Chrome + CDP，profile 副本 + `dsh --profile web`）：对会话行派发真实的 `contextmenu` MouseEvent 后，页面上出现的菜单项为 `取消置顶 / 重命名 / 分叉会话 / 归档会话 / 打开文件夹 / 删除任务`——六个入口齐备，与本插件通过 `sidebar.workspaces.session.menu.item` 注册的两项合并无误。
+- `node tools/test-setup.cjs` → 11/11、`node tools/test-host.cjs` → 27/27。
+
 ## v1.0.4 — 2026-10-14
 
 ### 修复

@@ -854,22 +854,49 @@ async function main() {
 	})
 	const contextHandler = handlers.find((entry) => entry.type === 'contextmenu')
 	check('right-click installs a delegated contextmenu listener', contextHandler !== undefined, JSON.stringify(handlers.map((h) => h.type)))
-	const rowElement = (key) => ({ closest: () => (key === null ? null : { dataset: { rowKey: key } }) })
-	let prevented = 0
-	contextHandler.handler({
-		button: 2,
-		defaultPrevented: false,
-		target: rowElement('session:session-aaa'),
-		clientX: 10,
-		clientY: 20,
-		preventDefault: () => { prevented += 1 },
+
+	// The shell owns the row menu, so a right-click must press the row's own
+	// `...` trigger rather than render a second, narrower menu.
+	const makeTrigger = () => {
+		const state = { clicks: 0 }
+		const button = { tagName: 'BUTTON', click: () => { state.clicks += 1 } }
+		return { state, button }
+	}
+	const rowElement = (key, { trigger = null, cluster = null } = {}) => ({
+		dataset: { rowKey: key },
+		querySelector: (selector) => {
+			if (typeof selector === 'string' && selector.includes('rowActions')) return cluster
+			if (typeof selector === 'string' && selector.includes('button') && cluster === null) return trigger
+			return null
+		},
+		closest: () => null,
 	})
+	const rowWithTrigger = (key) => {
+		const { state, button } = makeTrigger()
+		const cluster = {
+			querySelector: (selector) => (typeof selector === 'string' && selector.includes('button') ? button : null),
+			firstElementChild: button,
+		}
+		return { state, element: { dataset: { rowKey: key }, querySelector: (sel) => (typeof sel === 'string' && sel.includes('rowActions') ? cluster : null) } }
+	}
+	let prevented = 0
+	const rowA = rowWithTrigger('session:session-aaa')
+	contextHandler.handler({ button: 2, defaultPrevented: false, target: { closest: () => rowA.element }, preventDefault: () => { prevented += 1 } })
 	check('right-click on a session row is claimed', prevented === 1, String(prevented))
+	check('right-click opens the shell row menu through its trigger', rowA.state.clicks === 1, String(rowA.state.clicks))
+
+	// A row with no trigger (a blank row) is left entirely alone.
+	let blankPrevented = 0
+	contextHandler.handler({ button: 2, defaultPrevented: false, target: { closest: () => rowElement('session:session-blank') }, preventDefault: () => { blankPrevented += 1 } })
+	check('right-click on a row without a trigger is ignored', blankPrevented === 0, String(blankPrevented))
+
 	let untouched = 0
-	contextHandler.handler({ button: 2, defaultPrevented: false, target: rowElement('workspace:ws-1'), clientX: 0, clientY: 0, preventDefault: () => { untouched += 1 } })
-	contextHandler.handler({ button: 0, defaultPrevented: false, target: rowElement('session:session-aaa'), clientX: 0, clientY: 0, preventDefault: () => { untouched += 1 } })
-	contextHandler.handler({ button: 2, defaultPrevented: true, target: rowElement('session:session-aaa'), clientX: 0, clientY: 0, preventDefault: () => { untouched += 1 } })
+	const rowB = rowWithTrigger('session:session-bbb')
+	contextHandler.handler({ button: 2, defaultPrevented: false, target: { closest: () => rowElement('workspace:ws-1') }, preventDefault: () => { untouched += 1 } })
+	contextHandler.handler({ button: 0, defaultPrevented: false, target: { closest: () => rowB.element }, preventDefault: () => { untouched += 1 } })
+	contextHandler.handler({ button: 2, defaultPrevented: true, target: { closest: () => rowB.element }, preventDefault: () => { untouched += 1 } })
 	check('right-click leaves non-session rows and other menus alone', untouched === 0, String(untouched))
+	check('ignored right-clicks press no trigger', rowB.state.clicks === 0, String(rowB.state.clicks))
 	void seen
 
 	report()
