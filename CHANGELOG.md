@@ -2,6 +2,12 @@
 
 版本号与 `package.json` 的 `version` 一致，每个版本对应一个 git tag（`git tag -l`）。每个小节可以直接当作 GitHub Release 的正文。
 
+## 未发布（本地定制）
+
+### 移除
+
+- **去掉「批量操作」侧边栏面板**。侧边栏轨道上的「批量操作」按钮（`sidebar.panellist` id `archived-sessions.batch`，order 30）与其 `main` 面板主体一并删除：`BatchPanel` / `BatchPanelIcon` 组件、`batchInject`、`archiveViaService` / `runSequential` 两个只服务批量流程的辅助函数、`PANEL_ID` 常量、中英文两份 `panel*` 文案、以及 `.as-panel` / `.as-check` 两条面板专用 CSS。插件保留的入口不变：设置页「已归档会话」、会话行 `...` 菜单 / 右键菜单。单会话的归档 / 恢复 / 删除行为未受影响（`createRowActions` 未被改动）。
+
 ## v1.0.7 — 2026-10-14
 
 ### 修复
